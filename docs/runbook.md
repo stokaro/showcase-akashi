@@ -345,6 +345,28 @@ AKASHI_SKIP_EMBEDDED_MIGRATIONS=true
 
 This avoids startup migration races and keeps migration ownership with Atlas.
 
+### Running migrations with ptah-compat
+
+[`ptah-compat`](https://docs.ptah.run/edge/atlas/overview/) is an MIT-licensed drop-in for the Atlas CLI commands above. It reads the same `atlas.hcl`, verifies the same `atlas.sum`, and records into the same `atlas_schema_revisions` table, so either tool can continue a history the other started. The Makefile targets take it through `ATLAS`:
+
+```sh
+go install ptah.run/cmd/ptah-compat@<version>   # the version the migrations-ptah-compat CI job pins
+make migrate-validate ATLAS=ptah-compat
+make migrate-apply ATLAS=ptah-compat
+make migrate-status ATLAS=ptah-compat
+```
+
+The `migrations-ptah-compat` CI job applies every migration with it on the same TimescaleDB image as `verify-exit-criteria`, then checks that `atlas migrate status` reads the result as fully applied.
+
+Two behaviors differ from the Atlas CLI, and both matter for a `-- atlas:txmode none` migration such as `CREATE INDEX CONCURRENTLY`:
+
+| | Atlas CLI v1.1.0 | ptah-compat |
+|---|---|---|
+| Another session holds a conflicting lock | the build waits for as long as the lock is held | a `-- +ptah lock_timeout=5s` header line fails the statement after 5s with SQLSTATE 55P03; Atlas reads the line as a comment |
+| A concurrent unique index failed on duplicates, the data was fixed, and the migration runs again | `IF NOT EXISTS` skips the invalid index and the migration is recorded as applied | refuses to record the migration while `pg_index` reports the index invalid, and names `REINDEX` |
+
+Details: [migration directives](https://docs.ptah.run/edge/versioned/apply/) and [where ptah-compat differs from Atlas](https://docs.ptah.run/edge/atlas/retained-divergences/#a-migration-that-would-be-recorded-over-an-invalid-index).
+
 ### Backup
 
 Standard `pg_dump` works. Key tables by priority:

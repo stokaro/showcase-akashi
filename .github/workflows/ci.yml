@@ -228,3 +228,75 @@ jobs:
       - name: Verify durability exit criteria
         run: |
           make verify-exit-criteria
+
+  # The same history as verify-exit-criteria, applied by ptah-compat instead of
+  # the Atlas CLI. ptah-compat reads atlas.hcl and atlas.sum and writes the same
+  # atlas_schema_revisions table, so the last Atlas step is the check that the
+  # two tools agree on what was applied.
+  migrations-ptah-compat:
+    name: Migrations (ptah-compat)
+    runs-on: ubuntu-latest
+    services:
+      timescaledb:
+        image: timescale/timescaledb:latest-pg18
+        env:
+          POSTGRES_USER: akashi
+          POSTGRES_PASSWORD: akashi
+          POSTGRES_DB: akashi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U akashi -d akashi"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://akashi:akashi@localhost:5432/akashi?sslmode=disable
+      MAX_DEAD_LETTERS: "0"
+      MAX_OUTBOX_OLDEST_SECONDS: "1800"
+      STRICT_RETENTION_CHECK: "false"
+      # Pinned like Atlas. v0.8.1 is the first release that keeps the leading
+      # zeros of a revision version and ignores the schemas timescaledb
+      # creates in the clean gate; this job depends on both.
+      PTAH_COMPAT_VERSION: v0.8.1
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      # setup-go sets GOTOOLCHAIN=local, and the ptah module needs a newer Go
+      # than go.mod selects. auto lets go install fetch that toolchain, which
+      # the checksum database verifies like the module.
+      - name: Install ptah-compat
+        env:
+          GOTOOLCHAIN: auto
+        run: go install "ptah.run/cmd/ptah-compat@${PTAH_COMPAT_VERSION}"
+
+      - name: Install Atlas
+        uses: ariga/setup-atlas@cf119a6512b9133214e3a98bd4f731bfc413e9cb
+        with:
+          version: v1.1.0
+
+      - name: Bootstrap extensions
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+
+      - name: Validate migrations with ptah-compat
+        run: make migrate-validate ATLAS=ptah-compat
+
+      - name: Apply migrations with ptah-compat
+        run: make migrate-apply ATLAS=ptah-compat
+
+      - name: Atlas reads the history ptah-compat wrote
+        run: |
+          atlas migrate status --dir file://migrations --url "$DATABASE_URL" | tee status.txt
+          grep -q 'Migration Status: OK' status.txt
+          grep -q 'Pending Files:   0' status.txt
+
+      - name: Verify durability exit criteria
+        run: |
+          make verify-exit-criteria
